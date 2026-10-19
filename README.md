@@ -44,6 +44,12 @@ pip3 install -r requirements.txt
 Each tool's README has the exact commands. Both need root on the controller
 side (bind :53 or sniff/send raw ICMP).
 
+## How this was built
+
+Written with help from Grok. It drafted code and first drafts of the docs.
+Every design decision, test run, and lab check was mine, and nothing went in
+unread. These tools are for authorised labs only.
+
 ## License
 
 MIT, all of it. Use it, change it, ship it — within the limits in
