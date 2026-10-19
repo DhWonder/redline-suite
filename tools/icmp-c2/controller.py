@@ -168,10 +168,10 @@ def parse_args():
 def main() -> None:
     global TARGET_IP, IFACE
 
+    args = parse_args()
     if os.geteuid() != 0:
         sys.exit("[-] Needs root (sudo).")
 
-    args = parse_args()
     if not args.target or not args.iface:
         sys.exit(
             "[-] Set --target and --iface (or ICMP_C2_TARGET / ICMP_C2_IFACE). "

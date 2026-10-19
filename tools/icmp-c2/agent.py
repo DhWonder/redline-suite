@@ -176,10 +176,10 @@ def parse_args():
 def main() -> None:
     global INTERFACE, C2_SERVER_IP
 
+    args = parse_args()
     if os.geteuid() != 0:
         sys.exit("[-] Needs root (sudo).")
 
-    args = parse_args()
     if not args.server or not args.iface:
         sys.exit(
             "[-] Set --server and --iface (or ICMP_C2_SERVER / ICMP_C2_IFACE). "
