@@ -122,6 +122,7 @@ def _qname_end(query_data: bytes) -> int:
 
 
 def build_a_response(query_data: bytes, four_bytes) -> bytes:
+    """A answer; TTL=60 (short, normal-looking; uniqueness comes from QNAMEs)."""
     payload = four_bytes.encode() if isinstance(four_bytes, str) else four_bytes
     payload = payload.ljust(4, b"\x00")[:4]
     tid = query_data[:2]
@@ -129,11 +130,12 @@ def build_a_response(query_data: bytes, four_bytes) -> bytes:
     counts = b"\x00\x01\x00\x01\x00\x00\x00\x00"
     qend = _qname_end(query_data)
     question = query_data[12 : qend + 4]
-    answer = b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x05\x00\x04" + payload
+    answer = b"\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04" + payload  # TTL 60
     return tid + flags + counts + question + answer
 
 
 def build_txt_response(query_data: bytes, text: str) -> bytes:
+    """TXT answer; TTL=60 (short, normal-looking; uniqueness comes from QNAMEs)."""
     tid = query_data[:2]
     flags = b"\x81\x80"
     counts = b"\x00\x01\x00\x01\x00\x00\x00\x00"
@@ -147,7 +149,7 @@ def build_txt_response(query_data: bytes, text: str) -> bytes:
         b"\xc0\x0c"
         + b"\x00\x10"
         + b"\x00\x01"
-        + b"\x00\x00\x00\x05"
+        + b"\x00\x00\x00\x3c"  # TTL 60
         + len(rdata).to_bytes(2, "big")
         + rdata
     )

