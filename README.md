@@ -20,6 +20,7 @@ have written permission to test. See [DISCLAIMER.md](DISCLAIMER.md).
 |------|----------|--------------|
 | [aether-dns](tools/aether-dns) | Python | DNS tunnelling C2: AES-256-GCM payloads in base32 labels, selective-repeat retries, beacon jitter. Controller and agent. |
 | [icmp-c2](tools/icmp-c2) | Python | ICMP echo C2: zlib-chunked streams over type-8 packets, RETRY/ACK, source-IP filter. Controller and agent. |
+| [spoof-proof](tools/spoof-proof) | Python | Email-auth spoof demo: for a domain missing DMARC/DKIM, sends one clearly `[DEMO]`-marked message with a forged `From` to an address you control, proving impersonation. Reuses the blue-team [domain-checker](https://github.com/DhWonder/plaintext-suite/tree/main/tools/domain-checker) verdict. Authorised demos only. |
 
 Start with **aether-dns** if you want encrypted DNS labels and a menu that
 survives longer commands. Use **icmp-c2** when you want a thinner channel that
